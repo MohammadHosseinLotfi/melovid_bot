@@ -3,7 +3,7 @@
 // Telegram Bot Token
 define('BOT_TOKEN', '8189622183:AAG_9aQTt6rxbK73C5P7QDwfvoVqriLnPzI');
 // Telegram Bot Username
-define('BOT_USERNAME', 'sdvnfujvsolv'); // Without @
+define('BOT_USERNAME', 'NaghmehAdhanBot'); // Without @
 
 // Database Credentials
 define('DB_HOST', '127.0.0.1');

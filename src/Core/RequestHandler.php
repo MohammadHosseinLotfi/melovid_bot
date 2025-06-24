@@ -43,10 +43,16 @@ class RequestHandler
             return;
         }
 
-        // Authenticate admin
+        // Handle /start command separately to allow non-admins for deep links
+        if (isset($update['message']['text']) && str_starts_with($update['message']['text'], '/start')) {
+            $this->handleStartCommand($update['message']);
+            return;
+        }
+
+        // For all other messages and callbacks, authenticate admin
         if (!$this->authController->isAdmin($userId)) {
-            error_log("Unauthorized access attempt by user ID: " . $userId);
-            if ($chatId && !$isCallbackQuery) { // Only send message for direct messages, not for unauthorized callback clicks
+            error_log("Unauthorized access attempt by user ID: " . $userId . " for update: " . json_encode($update));
+            if ($chatId && !$isCallbackQuery) {
                  $this->telegramService->sendMessage($chatId, "متاسفانه شما اجازه دسترسی به این ربات را ندارید.");
             } elseif ($isCallbackQuery && isset($update['callback_query']['id'])) {
                 $this->telegramService->answerCallbackQuery($update['callback_query']['id'], [
@@ -57,40 +63,62 @@ class RequestHandler
             return;
         }
 
-        // At this point, the user is a verified admin.
-        // Now, route the request based on its type (message, callback_query, etc.)
-
+        // At this point, the user is a verified admin for non-/start commands or callbacks.
         if ($isCallbackQuery) {
             $this->handleCallbackQuery($update['callback_query']);
         } elseif (isset($update['message'])) {
-            $this->handleMessage($update['message']);
+            // We've already handled /start, so this is for other admin messages
+            $this->handleAdminMessage($update['message']);
         } else {
-            error_log("Unhandled update type: " . json_encode($update));
+            error_log("Unhandled update type for admin: " . json_encode($update));
         }
     }
 
-    private function handleMessage(array $message): void
+    private function handleStartCommand(array $message): void
+    {
+        $chatId = $message['chat']['id'];
+        $userId = $message['from']['id'];
+        $text = $message['text']; // Already checked it's a /start message
+
+        $parts = explode(' ', $text, 2);
+        $shortCode = $parts[1] ?? null;
+
+        if ($shortCode) {
+            // Deep link for lyrics, accessible to all users
+            error_log("DeepLink: Processing /start with shortCode '{$shortCode}' for user {$userId}");
+            $this->musicController->handleDeepLinkLyricsRequest($chatId, $shortCode, $this->authController->isAdmin($userId));
+        } else {
+            // Regular /start command
+            if ($this->authController->isAdmin($userId)) {
+                $this->clearAdminState($userId);
+                $this->musicController->sendMainMenu($chatId);
+            } else {
+                $this->telegramService->sendMessage($chatId, "سلام! برای استفاده از امکانات خاص ربات، لطفاً از طریق لینک‌های معتبر اقدام کنید یا با ادمین تماس بگیرید.");
+            }
+        }
+    }
+
+    /**
+     * Handles messages from authenticated admins (excluding /start).
+     */
+    private function handleAdminMessage(array $message): void
     {
         $chatId = $message['chat']['id'];
         $userId = $message['from']['id']; // Admin user ID
         $text = $message['text'] ?? null;
         $audio = $message['audio'] ?? null;
-        // Other message types like 'document', 'photo' can be handled if needed.
 
-        // Get admin state
         $adminState = $this->getAdminState($userId);
 
-        if ($text === '/start') {
-            $this->clearAdminState($userId); // Clear any pending state on /start
-            $this->musicController->sendMainMenu($chatId);
-        } elseif ($text === 'ارسال موزیک' && !$adminState) { // Assuming 'ارسال موزیک' is a main menu button
+        // Note: /start is handled by handleStartCommand now
+        if ($text === 'ارسال موزیک' && !$adminState) {
             $this->musicController->requestMusicFile($chatId, $userId);
         } elseif ($adminState) {
             // If admin is in a specific state, pass the message to the appropriate handler
             $stateParts = explode('_', $adminState['state'], 2);
             $currentState = $stateParts[0]; // e.g., waitingForMusicFile, waitingForLyrics
             $stateData = $adminState['data'] ? json_decode($adminState['data'], true) : [];
-            
+
             if ($currentState === MusicController::STATE_WAITING_FOR_MUSIC_FILE) {
                 if ($audio) {
                     $this->musicController->handleMusicFile($chatId, $userId, $audio);
@@ -121,9 +149,45 @@ class RequestHandler
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_NEW_FILE) {
                  if ($audio) {
                     $musicId = $stateData['music_id'] ?? null;
-                    if (!$musicId) { /* ... error handling ... */ }
+                    if (!$musicId) {
+                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_NEW_FILE. User: " . $userId);
+                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش فایل رخ داد. لطفاً مجدداً تلاش کنید.");
+                        $this->clearAdminState($userId);
+                        $this->musicController->sendMainMenu($chatId);
+                        return;
+                    }
                     $this->musicController->handleNewMusicFile($chatId, $userId, $audio, $musicId);
-                } else { /* ... */ }
+                } else {
+                     $this->telegramService->sendMessage($chatId, "لطفاً فایل موزیک جدید را ارسال کنید یا عملیات را لغو نمایید.");
+                }
+            } elseif ($currentState === MusicController::STATE_WAITING_FOR_ARTIST_NAME) {
+                if ($text) {
+                    $musicIdFromState = $stateData['music_id'] ?? null;
+                    if (!$musicIdFromState) {
+                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_ARTIST_NAME. User: " . $userId);
+                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش نام خواننده رخ داد. لطفاً مجدداً تلاش کنید.");
+                        $this->clearAdminState($userId);
+                        $this->musicController->sendMainMenu($chatId);
+                        return;
+                    }
+                    $this->musicController->handleNewArtistName($chatId, $userId, $text, $musicIdFromState);
+                } else {
+                    $this->telegramService->sendMessage($chatId, "لطفاً نام جدید خواننده را ارسال کنید یا عملیات را لغو نمایید.");
+                }
+            } elseif ($currentState === MusicController::STATE_WAITING_FOR_TITLE_NAME) {
+                if ($text) {
+                    $musicIdFromState = $stateData['music_id'] ?? null;
+                    if (!$musicIdFromState) {
+                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_TITLE_NAME. User: " . $userId);
+                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش عنوان موزیک رخ داد. لطفاً مجدداً تلاش کنید.");
+                        $this->clearAdminState($userId);
+                        $this->musicController->sendMainMenu($chatId);
+                        return;
+                    }
+                    $this->musicController->handleNewTitleName($chatId, $userId, $text, $musicIdFromState);
+                } else {
+                    $this->telegramService->sendMessage($chatId, "لطفاً عنوان جدید موزیک را ارسال کنید یا عملیات را لغو نمایید.");
+                }
             }
             // Add more state handlers as needed
             else {
@@ -157,7 +221,7 @@ class RequestHandler
 
         // Note: This routing can become more sophisticated.
         // For now, a simple switch or if-else based on $action.
-        
+
         // Example: route to MusicController based on action
         if ($action === 'delete' && $entity === 'music' && $entityId) {
             $this->musicController->confirmDeleteMusic($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
@@ -175,6 +239,14 @@ class RequestHandler
              $this->musicController->cancelEditFile($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
         } elseif ($action === 'send' && $entity === 'tochannel' && $entityId) {
             $this->musicController->sendToChannel($chatId, $userId, (int)$entityId, $callbackQueryId);
+        } elseif ($action === 'edit' && $entity === 'artist' && $entityId) {
+            $this->musicController->requestNewArtistName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'artist' && $entityId) {
+             $this->musicController->cancelEditArtistName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
+        } elseif ($action === 'edit' && $entity === 'title' && $entityId) {
+            $this->musicController->requestNewTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'title' && $entityId) {
+             $this->musicController->cancelEditTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
         }
         // Add more callback routes as needed
         else {
