@@ -31,7 +31,7 @@ class MusicController
     public function sendMainMenu(int $chatId): void
     {
         $keyboard = TelegramService::createReplyKeyboard([
-            ['ارسال موزیک'],
+            ['ارسال موزیک', 'لیست کل موزیک'],
         ], true, true);
 
         $this->telegramService->sendMessage($chatId, "چه کاری می‌خواهید انجام دهید؟ لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", [
@@ -694,5 +694,119 @@ class MusicController
             $escapedText = str_replace($char, '\\' . $char, $escapedText);
         }
         return $escapedText;
+    }
+
+    // --- Music List Logic ---
+    /**
+     * Displays a paginated list of music to the admin.
+     *
+     * @param int $chatId
+     * @param int $page Current page number (1-indexed).
+     * @param int $itemsPerPage Number of items to display per page.
+     * @param int|null $messageIdToEdit Optional message ID to edit, if paginating or changing item count.
+     */
+    public function showMusicList(int $chatId, int $page = 1, int $itemsPerPage = 5, ?int $messageIdToEdit = null): void
+    {
+        if ($page < 1) $page = 1;
+        if (!in_array($itemsPerPage, [5, 10, 15, 20])) $itemsPerPage = 5; // Default and allowed values
+
+        $offset = ($page - 1) * $itemsPerPage;
+
+        // Get total number of musics
+        $totalMusicsResult = Database::fetchOne("SELECT COUNT(*) as count FROM musics");
+        $totalMusics = $totalMusicsResult ? (int)$totalMusicsResult['count'] : 0;
+        $totalPages = $totalMusics > 0 ? ceil($totalMusics / $itemsPerPage) : 1;
+        if ($page > $totalPages) $page = $totalPages; // Adjust if page is out of bounds
+
+        // Get musics for the current page
+        $musics = Database::fetchAll(
+            "SELECT title, artist, short_code FROM musics ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            [$itemsPerPage, $offset]
+        );
+
+        $messageText = "🎧 *لیست موزیک‌ها* (صفحه {$page} از {$totalPages})\n\n";
+
+        if (empty($musics)) {
+            $messageText .= "موزیکی برای نمایش یافت نشد.";
+        } else {
+            foreach ($musics as $index => $music) {
+                $titleDisplay = $this->escapeMarkdown($music['title'] ?? 'بدون عنوان');
+                $artistDisplay = $this->escapeMarkdown($music['artist'] ?? 'ناشناس');
+                $messageText .= ($offset + $index + 1) . ". {$titleDisplay} - {$artistDisplay}\n";
+                $messageText .= "   کامند: `/music_{$music['short_code']}`\n\n";
+            }
+        }
+
+        $inlineKeyboardRows = [];
+
+        // Pagination buttons
+        $paginationButtons = [];
+        if ($page > 1) {
+            $paginationButtons[] = ['text' => "⬅️ قبلی", 'callback_data' => "listmusic_page_" . ($page - 1) . "_{$itemsPerPage}"];
+        }
+        if ($page < $totalPages) {
+            $paginationButtons[] = ['text' => "➡️ بعدی", 'callback_data' => "listmusic_page_" . ($page + 1) . "_{$itemsPerPage}"];
+        }
+        if (!empty($paginationButtons)) {
+            $inlineKeyboardRows[] = $paginationButtons;
+        }
+
+        // Items per page buttons
+        $itemsPerPageButtons = [];
+        $counts = [5, 10, 15, 20];
+        foreach ($counts as $count) {
+            $itemsPerPageButtons[] = [
+                'text' => ($count == $itemsPerPage ? "🔸" : "") . $count . " تایی", // Mark current selection
+                'callback_data' => "listmusic_setcount_{$count}_{$page}" // Page might need to be reset to 1 or adjusted
+            ];
+        }
+        if (!empty($itemsPerPageButtons)) {
+            $inlineKeyboardRows[] = $itemsPerPageButtons;
+        }
+
+        $replyMarkup = null;
+        if (!empty($inlineKeyboardRows)) {
+            $replyMarkup = TelegramService::createInlineKeyboard($inlineKeyboardRows);
+        }
+
+        if ($messageIdToEdit) {
+            // Try to edit the existing message
+            $response = $this->telegramService->editMessageText($chatId, $messageIdToEdit, $messageText, [
+                'parse_mode' => 'Markdown',
+                'reply_markup' => $replyMarkup
+            ]);
+            if (!$response->isOk()) {
+                // If editing fails (e.g., message not found or content identical), send as new message
+                error_log("Failed to edit music list message: " . $response->getDescription());
+                $this->telegramService->sendMessage($chatId, $messageText, [
+                    'parse_mode' => 'Markdown',
+                    'reply_markup' => $replyMarkup
+                ]);
+            }
+        } else {
+            $this->telegramService->sendMessage($chatId, $messageText, [
+                'parse_mode' => 'Markdown',
+                'reply_markup' => $replyMarkup
+            ]);
+        }
+    }
+
+    /**
+     * Shows music details and management buttons based on a short code.
+     *
+     * @param int $chatId
+     * @param string $shortCode
+     */
+    public function showMusicDetailsByShortCode(int $chatId, string $shortCode): void
+    {
+        error_log("Attempting to show music details for short_code: {$shortCode} in chat {$chatId}");
+        $music = Database::fetchOne("SELECT id FROM musics WHERE short_code = ?", [$shortCode]);
+
+        if ($music && isset($music['id'])) {
+            $this->sendMusicPreviewToAdmin($chatId, (int)$music['id']);
+        } else {
+            error_log("Music with short_code {$shortCode} not found for chat {$chatId}");
+            $this->telegramService->sendMessage($chatId, "موزیکی با کد `{$this->escapeMarkdown($shortCode)}` یافت نشد.", ['parse_mode' => 'Markdown']);
+        }
     }
 }

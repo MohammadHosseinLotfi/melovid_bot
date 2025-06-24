@@ -111,8 +111,17 @@ class RequestHandler
         $adminState = $this->getAdminState($userId);
 
         // Note: /start is handled by handleStartCommand now
-        if ($text === 'ارسال موزیک' && !$adminState) {
+        if (str_starts_with($text, '/music_')) {
+            $shortCode = substr($text, strlen('/music_'));
+            if (!empty($shortCode)) {
+                $this->musicController->showMusicDetailsByShortCode($chatId, $shortCode);
+            } else {
+                $this->telegramService->sendMessage($chatId, "کد موزیک در کامند مشخص نشده است.");
+            }
+        } elseif ($text === 'ارسال موزیک' && !$adminState) {
             $this->musicController->requestMusicFile($chatId, $userId);
+        } elseif ($text === 'لیست کل موزیک' && !$adminState) { // New command
+            $this->musicController->showMusicList($chatId, 1, 5); // Show first page, 5 items
         } elseif ($adminState) {
             // If admin is in a specific state, pass the message to the appropriate handler
             $stateParts = explode('_', $adminState['state'], 2);
@@ -247,6 +256,22 @@ class RequestHandler
             $this->musicController->requestNewTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
         } elseif ($action === 'canceledit' && $entity === 'title' && $entityId) {
              $this->musicController->cancelEditTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
+        }
+        // Music list pagination and count change
+        elseif ($action === 'listmusic') {
+            $page = $parts[2] ?? 1;
+            $itemsPerPage = $parts[3] ?? 5;
+
+            if ($entity === 'page') {
+                $this->telegramService->answerCallbackQuery($callbackQueryId); // Acknowledge click
+                $this->musicController->showMusicList($chatId, (int)$page, (int)$itemsPerPage, $messageId);
+            } elseif ($entity === 'setcount') {
+                $newCount = (int)$page; // In 'listmusic_setcount_<count>_<currentPage>', $page holds the new count
+                $currentPageForCountChange = (int)$itemsPerPage; // and $itemsPerPage holds the current page
+                $this->telegramService->answerCallbackQuery($callbackQueryId); // Acknowledge click
+                // When changing count, go to page 1 of new count
+                $this->musicController->showMusicList($chatId, 1, $newCount, $messageId);
+            }
         }
         // Add more callback routes as needed
         else {
