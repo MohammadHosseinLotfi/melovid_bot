@@ -114,9 +114,26 @@ class RequestHandler
         } elseif ($text === 'لیست کل موزیک' && !$adminState) {
             $this->musicController->showMusicList($chatId, 1, 5);
         } elseif ($adminState) {
-            $stateParts = explode('_', $adminState['state'], 2); // Not really used now, but kept for structure
-            $currentState = $adminState['state']; // Use full state name
-            $stateData = $adminState['data'] ? json_decode($adminState['data'], true) : [];
+            $currentState = $adminState['state'];
+
+            // $adminState['data'] is already an array (or null) due to json_decode in getAdminState
+            $stateData = $adminState['data'] ?? [];
+
+            // Log the type and content of stateData for debugging
+            if (!isset($adminState['data'])) {
+                error_log("Admin {$userId} is in state: {$currentState} with NULL data field from getAdminState.");
+            } else {
+                $loggableData = print_r($adminState['data'], true);
+                if (strlen($loggableData) > 1000) {
+                    $loggableData = substr($loggableData, 0, 1000) . "... (data truncated)";
+                }
+                error_log("Admin {$userId} is in state: {$currentState} with data type from getAdminState: " . gettype($adminState['data']) . ", content: " . $loggableData);
+            }
+
+            if (!is_array($stateData)) {
+                 error_log("Warning: \$stateData was not an array after assignment for user {$userId}, state {$currentState}. Resetting to empty array. Original type from getAdminState['data']: " . gettype($adminState['data']));
+                 $stateData = [];
+            }
 
             if ($currentState === MusicController::STATE_WAITING_FOR_MUSIC_FILE) {
                 if ($audio) {
@@ -245,7 +262,6 @@ class RequestHandler
                 $this->musicController->showMusicList($chatId, (int)$param1, (int)$param2, $messageId);
             } elseif ($entity === 'setcount' && $param1 !== null && $param2 !== null) {
                 $newCount = (int)$param1;
-                // $currentPageForCountChange = (int)$param2; // Not strictly needed if we always go to page 1
                 $this->telegramService->answerCallbackQuery($callbackQueryId);
                 $this->musicController->showMusicList($chatId, 1, $newCount, $messageId);
             } else {
@@ -265,6 +281,7 @@ class RequestHandler
     private function getAdminState(int $adminId): ?array
     {
         $row = Database::fetchOne("SELECT state, data FROM admin_states WHERE admin_id = ?", [$adminId]);
+        // json_decode is done here. $row['data'] is a JSON string from DB.
         return $row ? ['state' => $row['state'], 'data' => $row['data'] ? json_decode($row['data'], true) : []] : null;
     }
 
