@@ -311,36 +311,129 @@ class MusicController
 
     // --- Edit and Delete Logic ---
     public function confirmDeleteMusic(int $chatId, int $messageId, int $adminId, int $musicId, string $callbackQueryId): void {
+        error_log("Confirming delete for music_id: {$musicId}, msg_id: {$messageId}, chat_id: {$chatId}");
         $keyboard = TelegramService::createInlineKeyboard([
             [
                 ['text' => 'بله، مطمئنم', 'callback_data' => "confirmdelete_music_{$musicId}"],
                 ['text' => 'خیر، لغو کن', 'callback_data' => "canceldelete_music_{$musicId}"],
             ]
         ]);
-        $this->telegramService->editMessageText($chatId, $messageId, "آیا از حذف این موزیک مطمئن هستید؟ این عمل قابل بازگشت نیست.", [
-            'reply_markup' => $keyboard
+
+        // Edit only the reply markup of the existing audio message
+        $response = $this->telegramService->editMessageReplyMarkup($chatId, $messageId, $keyboard);
+
+        if (!$response->isOk()) {
+            error_log("Failed to edit message reply markup for delete confirmation: " . $response->getDescription() . " ChatID: {$chatId}, MsgID: {$messageId}");
+            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'خطا در نمایش تاییدیه حذف.', 'show_alert' => true]);
+            return;
+        }
+
+        $this->telegramService->answerCallbackQuery($callbackQueryId, [
+            'text' => "آیا از حذف این موزیک مطمئن هستید؟ این عمل قابل بازگشت نیست.",
+            'show_alert' => true
         ]);
-        $this->telegramService->answerCallbackQuery($callbackQueryId);
     }
 
     public function executeDeleteMusic(int $chatId, int $messageId, int $adminId, int $musicId, string $callbackQueryId): void {
-        $deleted = Database::executeQuery("DELETE FROM musics WHERE id = ?", [$musicId]);
-        if ($deleted && $deleted->rowCount() > 0) {
-            $this->telegramService->editMessageText($chatId, $messageId, "موزیک با موفقیت حذف شد.");
-            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'موزیک حذف شد.']);
+        error_log("Executing delete for music_id: {$musicId}, msg_id: {$messageId}, chat_id: {$chatId}");
+        $music = Database::fetchOne("SELECT title FROM musics WHERE id = ?", [$musicId]);
+        $musicTitle = $music ? $this->escapeMarkdown($music['title']) : "این موزیک";
+
+        $deletedStmt = Database::executeQuery("DELETE FROM musics WHERE id = ?", [$musicId]);
+
+        if ($deletedStmt && $deletedStmt->rowCount() > 0) {
+            error_log("Successfully deleted music_id: {$musicId} from database.");
+
+            $captionEditResponse = $this->telegramService->editMessageCaption($chatId, $messageId, [
+                'caption' => "موزیک '{$musicTitle}' با موفقیت حذف شد. ✅",
+                'reply_markup' => null
+            ]);
+
+            if (!$captionEditResponse->isOk()){
+                error_log("Failed to edit caption for deleted music {$musicId}: " . $captionEditResponse->getDescription() . ". ChatID: {$chatId}, MsgID: {$messageId}");
+                $this->telegramService->sendMessage($chatId, "موزیک '{$musicTitle}' با موفقیت از پایگاه داده حذف شد (خطا در به‌روزرسانی پیام اصلی).");
+            }
+            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => "موزیک '{$musicTitle}' حذف شد."]);
         } else {
-            $this->telegramService->editMessageText($chatId, $messageId, "خطا در حذف موزیک. ممکن است قبلاً حذف شده باشد.");
-            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'خطا در حذف!', 'show_alert' => true]);
+            error_log("Failed to delete music_id: {$musicId} from database or already deleted. RowCount: " . ($deletedStmt ? $deletedStmt->rowCount() : 'N/A'));
+            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => "خطا در حذف {$musicTitle} از پایگاه داده!", 'show_alert' => true]);
+            $this->restorePreviewButtons($chatId, $messageId, $musicId);
+        }
+    }
+
+    private function restorePreviewButtons(int $chatId, int $messageId, int $musicId): void
+    {
+        error_log("Restoring preview buttons for music_id: {$musicId} on msg_id: {$messageId}");
+        $music = Database::fetchOne("SELECT id FROM musics WHERE id = ?", [$musicId]);
+        if ($music) {
+            $originalKeyboard = TelegramService::createInlineKeyboard([
+                [['text' => '🎼 ویرایش فایل', 'callback_data' => "edit_file_{$musicId}"], ['text' => '📝 ویرایش متن', 'callback_data' => "edit_lyrics_{$musicId}"]],
+                [['text' => '🗑️ حذف موزیک', 'callback_data' => "delete_music_{$musicId}"]],
+                [['text' => '🎤 ویرایش خواننده', 'callback_data' => "edit_artist_{$musicId}"], ['text' => '🎶 ویرایش عنوان', 'callback_data' => "edit_title_{$musicId}"]],
+                [['text' => '📲 ارسال به کانال', 'callback_data' => "send_tochannel_{$musicId}"]]
+            ]);
+            $response = $this->telegramService->editMessageReplyMarkup($chatId, $messageId, $originalKeyboard);
+            if (!$response->isOk()) {
+                error_log("Failed to restore reply markup for music_id {$musicId} on msg_id {$messageId}: " . $response->getDescription());
+                $this->sendMusicPreviewToAdmin($chatId, $musicId);
+            }
+        } else {
+            // If music not found, we can't show its specific buttons, so just remove current buttons (Yes/No for delete)
+            // and inform the user.
+            $this->telegramService->editMessageReplyMarkup($chatId, $messageId, null);
+            $this->telegramService->editMessageCaption($chatId, $messageId, [
+                 'caption' => "خطا: موزیک یافت نشد، امکان بازگردانی دکمه‌های پیش‌نمایش وجود ندارد."
+            ]);
+            // $this->telegramService->editMessageText($chatId, $messageId, "خطا: موزیک یافت نشد، امکان بازگردانی دکمه‌ها وجود ندارد.");
         }
     }
 
     public function cancelDeleteMusic(int $chatId, int $messageId, int $musicId, string $callbackQueryId): void {
+        error_log("Cancelling delete for music_id: {$musicId}, msg_id: {$messageId}, chat_id: {$chatId}");
         $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'حذف لغو شد.']);
-        // $this->telegramService->editMessageText($chatId, $messageId, "عملیات حذف موزیک لغو شد. نمایش مجدد پیش‌نمایش...");
-        // Edit the message to remove confirmation buttons and state cancellation, then send new preview.
-        $this->telegramService->editMessageReplyMarkup($chatId, $messageId, null); // Remove buttons
-        $this->telegramService->editMessageText($chatId, $messageId, "عملیات حذف موزیک لغو شد.");
-        $this->sendMusicPreviewToAdmin($chatId, $musicId);
+
+        $music = Database::fetchOne("SELECT file_id, title, artist, lyrics FROM musics WHERE id = ?", [$musicId]);
+        if ($music) {
+            $titleDisplay = $music['title'] ?? 'بدون عنوان';
+            $artistDisplay = $music['artist'] ?? 'ناشناس';
+            $caption = "🎵 *" . $this->escapeMarkdown($titleDisplay) . "*";
+            if ($artistDisplay !== 'ناشناس' && !empty($artistDisplay)) {
+                $caption .= "\n👤 خواننده: *" . $this->escapeMarkdown($artistDisplay) . "*";
+            }
+            if ($music['lyrics']) {
+                $normalized_lyrics = str_replace(["\r\n", "\r", "\n"], ' ', $music['lyrics']);
+                $summary = mb_substr($normalized_lyrics, 0, 150);
+                $caption .= "\n\n📜 خلاصه متن:\n" . trim($this->escapeMarkdown($summary)) . (mb_strlen($normalized_lyrics) > 150 ? '...' : '');
+            } else {
+                $caption .= "\n\n(متن ترانه وارد نشده است)";
+            }
+
+            $originalKeyboard = TelegramService::createInlineKeyboard([
+                [['text' => '🎼 ویرایش فایل', 'callback_data' => "edit_file_{$musicId}"], ['text' => '📝 ویرایش متن', 'callback_data' => "edit_lyrics_{$musicId}"]],
+                [['text' => '🗑️ حذف موزیک', 'callback_data' => "delete_music_{$musicId}"]],
+                [['text' => '🎤 ویرایش خواننده', 'callback_data' => "edit_artist_{$musicId}"], ['text' => '🎶 ویرایش عنوان', 'callback_data' => "edit_title_{$musicId}"]],
+                [['text' => '📲 ارسال به کانال', 'callback_data' => "send_tochannel_{$musicId}"]]
+            ]);
+
+            $response = $this->telegramService->editMessageCaption($chatId, $messageId, [
+                'caption' => $caption,
+                'reply_markup' => $originalKeyboard
+            ]);
+            if (!$response->isOk()){
+                 error_log("Failed to restore caption and reply markup for music_id {$musicId} on msg_id {$messageId} during cancel delete: " . $response->getDescription());
+                 $this->telegramService->sendMessage($chatId, "عملیات حذف لغو شد. نمایش مجدد پیش‌نمایش...");
+                 $this->sendMusicPreviewToAdmin($chatId, $musicId);
+            }
+        } else {
+            error_log("Music not found for music_id {$musicId} during cancel delete. Cannot restore preview for msg_id {$messageId}.");
+            $this->telegramService->editMessageReplyMarkup($chatId, $messageId, null);
+            $captionEditResponse = $this->telegramService->editMessageCaption($chatId, $messageId, [
+                'caption' => "عملیات حذف لغو شد. موزیک اصلی برای بازگردانی پیش‌نمایش یافت نشد."
+            ]);
+            if (!$captionEditResponse->isOk()) {
+                $this->telegramService->sendMessage($chatId, "عملیات حذف لغو شد. موزیک اصلی برای بازگردانی پیش‌نمایش یافت نشد.");
+            }
+        }
     }
 
 
@@ -369,15 +462,13 @@ class MusicController
         Database::executeQuery("UPDATE musics SET lyrics = ? WHERE id = ?", [$newLyrics, $musicId]);
         $this->clearAdminState($adminId);
 
-        // $this->telegramService->sendMessage($chatId, "متن موزیک با موفقیت به‌روزرسانی شد."); // Removed, preview is enough
-
         if (isset($stateData['prompt_message_id'])) {
              $this->telegramService->editMessageText(
                  $chatId,
                  $stateData['prompt_message_id'],
                  "متن جدید دریافت شد. ✅"
              );
-             $this->telegramService->editMessageReplyMarkup($chatId, $stateData['prompt_message_id'], null); // Remove "cancel" button
+             $this->telegramService->editMessageReplyMarkup($chatId, $stateData['prompt_message_id'], null);
         }
         $this->sendMusicPreviewToAdmin($chatId, $musicId);
     }
@@ -390,7 +481,7 @@ class MusicController
             $promptMessageIdToEdit,
             "ویرایش متن لغو شد."
         );
-        $this->telegramService->editMessageReplyMarkup($chatId, $promptMessageIdToEdit, null); // Remove "cancel" button
+        $this->telegramService->editMessageReplyMarkup($chatId, $promptMessageIdToEdit, null);
         $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'ویرایش متن لغو شد.']);
     }
 
@@ -439,7 +530,6 @@ class MusicController
         Database::executeQuery($updateQuery, $params);
 
         $this->clearAdminState($adminId);
-        // $this->telegramService->sendMessage($chatId, "فایل موزیک با موفقیت به‌روزرسانی شد."); // Removed, preview is enough
 
         if (isset($stateData['prompt_message_id'])) {
              $this->telegramService->editMessageText(
@@ -490,8 +580,6 @@ class MusicController
         Database::executeQuery("UPDATE musics SET artist = ? WHERE id = ?", [$newArtistName, $musicId]);
         $this->clearAdminState($adminId);
 
-        // $this->telegramService->sendMessage($chatId, "نام خواننده با موفقیت به‌روزرسانی شد."); // Removed
-
         if (isset($stateData['prompt_message_id'])) {
              $this->telegramService->editMessageText(
                  $chatId,
@@ -540,8 +628,6 @@ class MusicController
 
         Database::executeQuery("UPDATE musics SET title = ? WHERE id = ?", [$newTitleName, $musicId]);
         $this->clearAdminState($adminId);
-
-        // $this->telegramService->sendMessage($chatId, "عنوان موزیک با موفقیت به‌روزرسانی شد."); // Removed
 
         if (isset($stateData['prompt_message_id'])) {
              $this->telegramService->editMessageText(

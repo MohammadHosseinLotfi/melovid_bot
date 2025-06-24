@@ -27,6 +27,23 @@ class TelegramService
     }
 
     /**
+     * Edit message caption.
+     *
+     * @param int|string $chat_id
+     * @param int $message_id
+     * @param array $data Should include 'caption', and optionally 'reply_markup', 'parse_mode'.
+     * @return ServerResponse
+     */
+    public function editMessageCaption(int|string $chat_id, int $message_id, array $data): ServerResponse
+    {
+        $payload = array_merge([
+            'chat_id'    => $chat_id,
+            'message_id' => $message_id,
+        ], $data); // $data must contain 'caption'
+        return Request::editMessageCaption($payload);
+    }
+
+    /**
      * Get the Telegram API instance.
      * @return Telegram
      */
@@ -81,7 +98,7 @@ class TelegramService
         ], $data);
         return Request::editMessageText($payload);
     }
-    
+
     /**
      * Edit message reply markup.
      *
