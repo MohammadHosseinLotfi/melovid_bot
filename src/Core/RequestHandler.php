@@ -5,7 +5,7 @@ namespace TelegramMusicBot\Core;
 use TelegramMusicBot\Services\TelegramService;
 use TelegramMusicBot\Controllers\AuthController;
 use TelegramMusicBot\Controllers\MusicController;
-use TelegramMusicBot\Core\Database; // For state management
+use TelegramMusicBot\Core\Database;
 
 class RequestHandler
 {
@@ -41,27 +41,21 @@ class RequestHandler
             return;
         }
 
-        // Handle /start command separately to allow non-admins for deep links
         if (isset($update['message']['text']) && str_starts_with($update['message']['text'], '/start')) {
             $this->handleStartCommand($update['message']);
             return;
         }
 
-        // For all other messages and callbacks, authenticate admin
         if (!$this->authController->isAdmin($userId)) {
             error_log("Unauthorized access attempt by user ID: " . $userId . " for update: " . json_encode($update));
             if ($chatId && !$isCallbackQuery) {
                  $this->telegramService->sendMessage($chatId, "متاسفانه شما اجازه دسترسی به این ربات را ندارید.");
             } elseif ($isCallbackQuery && isset($update['callback_query']['id'])) {
-                $this->telegramService->answerCallbackQuery($update['callback_query']['id'], [
-                    'text' => "شما مجاز نیستید.",
-                    'show_alert' => true,
-                ]);
+                $this->telegramService->answerCallbackQuery($update['callback_query']['id'], ['text' => "شما مجاز نیستید.", 'show_alert' => true]);
             }
             return;
         }
 
-        // At this point, the user is a verified admin for non-/start commands or callbacks.
         if ($isCallbackQuery) {
             $this->handleCallbackQuery($update['callback_query']);
         } elseif (isset($update['message'])) {
@@ -76,7 +70,6 @@ class RequestHandler
         $chatId = $message['chat']['id'];
         $userId = $message['from']['id'];
         $text = $message['text'];
-
         $parts = explode(' ', $text, 2);
         $shortCode = $parts[1] ?? null;
 
@@ -115,11 +108,8 @@ class RequestHandler
             $this->musicController->showMusicList($chatId, 1, 5);
         } elseif ($adminState) {
             $currentState = $adminState['state'];
-
-            // $adminState['data'] is already an array (or null) due to json_decode in getAdminState
             $stateData = $adminState['data'] ?? [];
 
-            // Log the type and content of stateData for debugging
             if (!isset($adminState['data'])) {
                 error_log("Admin {$userId} is in state: {$currentState} with NULL data field from getAdminState.");
             } else {
@@ -135,77 +125,55 @@ class RequestHandler
                  $stateData = [];
             }
 
-            if ($currentState === MusicController::STATE_WAITING_FOR_MUSIC_FILE) {
-                if ($audio) {
-                    $this->musicController->handleMusicFile($chatId, $userId, $audio);
+            // Handle channel caption input first if in that state
+            if ($currentState === MusicController::STATE_WAITING_FOR_CHANNEL_CAPTION) {
+                if ($text !== null) {
+                    $this->musicController->handleChannelCaptionInput($chatId, $userId, $text, $stateData);
                 } else {
-                    $this->telegramService->sendMessage($chatId, "لطفاً یک فایل موزیک ارسال کنید یا عملیات را لغو نمایید.");
+                    $this->telegramService->sendMessage($chatId, "لطفاً کپشن مورد نظر یا دستور `/emptycaption` را ارسال کنید.");
                 }
+                return;
+            }
+
+            // Other state handlings
+            if ($currentState === MusicController::STATE_WAITING_FOR_MUSIC_FILE) {
+                if ($audio) { $this->musicController->handleMusicFile($chatId, $userId, $audio); }
+                else { $this->telegramService->sendMessage($chatId, "لطفاً یک فایل موزیک ارسال کنید یا عملیات را لغو نمایید."); }
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_LYRICS) {
                  if ($text) {
                     $musicId = $stateData['music_id'] ?? null;
-                    if (!$musicId) {
-                        error_log("Error: music_id not found in state for waiting_for_lyrics. User: " . $userId);
-                        $this->telegramService->sendMessage($chatId, "خطایی رخ داده است. لطفاً مجدداً تلاش کنید.");
-                        $this->clearAdminState($userId);
-                        $this->musicController->sendMainMenu($chatId);
-                        return;
-                    }
+                    if (!$musicId) { $this->handleMissingMusicIdInState($chatId, $userId, "waiting_for_lyrics"); return; }
                     $this->musicController->handleLyrics($chatId, $userId, $text, $musicId);
-                } else {
-                    $this->telegramService->sendMessage($chatId, "لطفاً متن موزیک را ارسال کنید یا عملیات را لغو نمایید.");
-                }
+                } else { $this->telegramService->sendMessage($chatId, "لطفاً متن موزیک را ارسال کنید یا عملیات را لغو نمایید."); }
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_NEW_LYRICS) {
                 if ($text) {
                     $musicId = $stateData['music_id'] ?? null;
-                     if (!$musicId) {
-                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_NEW_LYRICS. User: " . $userId);
-                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش متن رخ داد.");
-                        $this->clearAdminState($userId); $this->musicController->sendMainMenu($chatId); return;
-                     }
+                     if (!$musicId) { $this->handleMissingMusicIdInState($chatId, $userId, "STATE_WAITING_FOR_NEW_LYRICS"); return;}
                     $this->musicController->handleNewLyrics($chatId, $userId, $text, $musicId);
-                } else {
-                    $this->telegramService->sendMessage($chatId, "لطفاً متن جدید را ارسال کنید یا عملیات را لغو نمایید.");
-                }
+                } else { $this->telegramService->sendMessage($chatId, "لطفاً متن جدید را ارسال کنید یا عملیات را لغو نمایید.");}
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_NEW_FILE) {
                  if ($audio) {
                     $musicId = $stateData['music_id'] ?? null;
-                    if (!$musicId) {
-                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_NEW_FILE. User: " . $userId);
-                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش فایل رخ داد.");
-                        $this->clearAdminState($userId); $this->musicController->sendMainMenu($chatId); return;
-                    }
+                    if (!$musicId) { $this->handleMissingMusicIdInState($chatId, $userId, "STATE_WAITING_FOR_NEW_FILE"); return;}
                     $this->musicController->handleNewMusicFile($chatId, $userId, $audio, $musicId);
-                } else {
-                     $this->telegramService->sendMessage($chatId, "لطفاً فایل موزیک جدید را ارسال کنید یا عملیات را لغو نمایید.");
-                }
+                } else { $this->telegramService->sendMessage($chatId, "لطفاً فایل موزیک جدید را ارسال کنید یا عملیات را لغو نمایید.");}
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_ARTIST_NAME) {
                 if ($text) {
                     $musicIdFromState = $stateData['music_id'] ?? null;
-                    if (!$musicIdFromState) {
-                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_ARTIST_NAME. User: " . $userId);
-                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش نام خواننده رخ داد.");
-                        $this->clearAdminState($userId); $this->musicController->sendMainMenu($chatId); return;
-                    }
+                    if (!$musicIdFromState) { $this->handleMissingMusicIdInState($chatId, $userId, "STATE_WAITING_FOR_ARTIST_NAME"); return;}
                     $this->musicController->handleNewArtistName($chatId, $userId, $text, $musicIdFromState);
-                } else {
-                    $this->telegramService->sendMessage($chatId, "لطفاً نام جدید خواننده را ارسال کنید یا عملیات را لغو نمایید.");
-                }
+                } else { $this->telegramService->sendMessage($chatId, "لطفاً نام جدید خواننده را ارسال کنید یا عملیات را لغو نمایید.");}
             } elseif ($currentState === MusicController::STATE_WAITING_FOR_TITLE_NAME) {
                 if ($text) {
                     $musicIdFromState = $stateData['music_id'] ?? null;
-                    if (!$musicIdFromState) {
-                        error_log("Error: music_id not found in state for STATE_WAITING_FOR_TITLE_NAME. User: " . $userId);
-                        $this->telegramService->sendMessage($chatId, "خطایی در پردازش ویرایش عنوان موزیک رخ داد.");
-                        $this->clearAdminState($userId); $this->musicController->sendMainMenu($chatId); return;
-                    }
+                    if (!$musicIdFromState) { $this->handleMissingMusicIdInState($chatId, $userId, "STATE_WAITING_FOR_TITLE_NAME"); return;}
                     $this->musicController->handleNewTitleName($chatId, $userId, $text, $musicIdFromState);
-                } else {
-                    $this->telegramService->sendMessage($chatId, "لطفاً عنوان جدید موزیک را ارسال کنید یا عملیات را لغو نمایید.");
-                }
+                } else { $this->telegramService->sendMessage($chatId, "لطفاً عنوان جدید موزیک را ارسال کنید یا عملیات را لغو نمایید.");}
             }
+            // Note: STATE_CONFIRM_CHANNEL_POST is handled via callback queries, not direct messages.
             else {
                 $this->telegramService->sendMessage($chatId, "دستور نامشخص است یا در وضعیت فعلی قابل پردازش نیست. لطفاً از دکمه‌ها استفاده کنید.");
+                $this->clearAdminState($userId); // Clear unknown/stuck state
                 $this->musicController->sendMainMenu($chatId);
             }
         } else {
@@ -225,38 +193,66 @@ class RequestHandler
         $parts = explode('_', $data);
         $action = $parts[0] ?? null;
         $entity = $parts[1] ?? null;
-        $entityId = $parts[2] ?? null;
+        $id1 = $parts[2] ?? null; // Usually musicId
+        $id2 = $parts[3] ?? null; // Sometimes original_message_id or prompt_message_id
 
-        if ($action === 'delete' && $entity === 'music' && $entityId) {
-            $this->musicController->confirmDeleteMusic($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'confirmdelete' && $entity === 'music' && $entityId) {
-            $this->musicController->executeDeleteMusic($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'canceldelete' && $entity === 'music' && $entityId) {
-             $this->musicController->cancelDeleteMusic($chatId, $messageId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'edit' && $entity === 'lyrics' && $entityId) {
-            $this->musicController->requestNewLyrics($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'canceledit' && $entity === 'lyrics' && $entityId) {
-            $this->musicController->cancelEditLyrics($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'edit' && $entity === 'file' && $entityId) {
-            $this->musicController->requestNewMusicFile($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'canceledit' && $entity === 'file' && $entityId) {
-             $this->musicController->cancelEditFile($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'send' && $entity === 'tochannel' && $entityId) {
-            $this->musicController->sendToChannel($chatId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'edit' && $entity === 'artist' && $entityId) {
-            $this->musicController->requestNewArtistName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'canceledit' && $entity === 'artist' && $entityId) {
-             $this->musicController->cancelEditArtistName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'edit' && $entity === 'title' && $entityId) {
-            $this->musicController->requestNewTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
-        } elseif ($action === 'canceledit' && $entity === 'title' && $entityId) {
-             $this->musicController->cancelEditTitleName($chatId, $messageId, $userId, (int)$entityId, $callbackQueryId);
+        if ($action === 'delete' && $entity === 'music' && $id1) {
+            $this->musicController->confirmDeleteMusic($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'confirmdelete' && $entity === 'music' && $id1) {
+            $this->musicController->executeDeleteMusic($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'canceldelete' && $entity === 'music' && $id1) {
+             $this->musicController->cancelDeleteMusic($chatId, $messageId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'edit' && $entity === 'lyrics' && $id1) {
+            $this->musicController->requestNewLyrics($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'lyrics' && $id1) {
+            $this->musicController->cancelEditLyrics($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'edit' && $entity === 'file' && $id1) {
+            $this->musicController->requestNewMusicFile($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'file' && $id1) {
+             $this->musicController->cancelEditFile($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        }
+        // Channel Caption Flow
+        elseif ($action === 'request' && $entity === 'chcaption' && $id1) { // from sendMusicPreviewToAdmin
+            $this->musicController->requestChannelCaption($chatId, $userId, (int)$id1, $callbackQueryId, $messageId);
+        } elseif ($action === 'cancel' && $entity === 'chcaption' && $id1 && $id2) { // from requestChannelCaption
+            $this->musicController->cancelChannelCaptionProcess($chatId, $userId, (int)$id1, $messageId, (int)$id2, $callbackQueryId);
+        } elseif ($action === 'retry' && $entity === 'chcaption' && $id1 && $id2) { // from handleChannelCaptionInput's preview
+             // $id1 is musicId, $id2 is original_preview_message_id
+             // $messageId is the ID of the caption preview message (the audio message with "Final Send" / "Edit Caption" buttons)
+            $this->telegramService->editMessageCaption($chatId, $messageId, ['caption' => 'درخواست ویرایش مجدد کپشن...', 'reply_markup' => null]);
+            // $this->telegramService->deleteMessage($chatId, $messageId); // Delete the caption preview message
+            $this->musicController->requestChannelCaption($chatId, $userId, (int)$id1, $callbackQueryId, (int)$id2);
+        } elseif ($action === 'finalsend' && $entity === 'tocanal' && $id1) { // from handleChannelCaptionInput's preview
+            $stateData = $this->getAdminStateData($userId);
+            if ($this->getAdminState($userId)['state'] === MusicController::STATE_CONFIRM_CHANNEL_POST && isset($stateData['channel_caption'])) {
+                $this->musicController->executeFinalSendToChannel($chatId, $userId, (int)$id1, $stateData['channel_caption'], $callbackQueryId, $messageId);
+            } else {
+                $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'خطا: وضعیت نامعتبر یا کپشن یافت نشد.', 'show_alert' => true]);
+                error_log("Error in finalsend_tocanal: Invalid state or missing caption for user {$userId}");
+            }
+        } elseif ($action === 'cancel' && $entity === 'sendprocess' && $id1 && $id2) { // from handleChannelCaptionInput's preview
+            // $id1 = musicId, $id2 = original_preview_message_id
+            // $messageId is the ID of the caption preview message (audio with "Final Send" buttons)
+            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'ارسال به کانال به طور کامل لغو شد.']);
+            $this->clearAdminState($userId);
+            $this->telegramService->editMessageCaption($chatId, $messageId, ['caption' => 'ارسال به کانال لغو شد.', 'reply_markup' => null]);
+            // Restore original preview for further actions if needed
+            // $this->musicController->sendMusicPreviewToAdmin($chatId, (int)$id1);
+             $this->telegramService->sendMessage($chatId, "می‌توانید از پیش‌نمایش اولیه موزیک (پیام قبلی) برای سایر عملیات استفاده کنید.");
+        }
+        // End Channel Caption Flow
+        elseif ($action === 'edit' && $entity === 'artist' && $id1) {
+            $this->musicController->requestNewArtistName($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'artist' && $id1) {
+             $this->musicController->cancelEditArtistName($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'edit' && $entity === 'title' && $id1) {
+            $this->musicController->requestNewTitleName($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
+        } elseif ($action === 'canceledit' && $entity === 'title' && $id1) {
+             $this->musicController->cancelEditTitleName($chatId, $messageId, $userId, (int)$id1, $callbackQueryId);
         }
         elseif ($action === 'listmusic') {
-            // callback_data format: listmusic_page_<page>_<itemsPerPage> OR listmusic_setcount_<count>_<currentPage>
-            $param1 = $parts[2] ?? null; // page for page, new_count for setcount
-            $param2 = $parts[3] ?? null; // itemsPerPage for page, current_page for setcount
-
+            $param1 = $parts[2] ?? null;
+            $param2 = $parts[3] ?? null;
             if ($entity === 'page' && $param1 !== null && $param2 !== null) {
                 $this->telegramService->answerCallbackQuery($callbackQueryId);
                 $this->musicController->showMusicList($chatId, (int)$param1, (int)$param2, $messageId);
@@ -270,10 +266,7 @@ class RequestHandler
             }
         }
         else {
-            $this->telegramService->answerCallbackQuery($callbackQueryId, [
-                'text' => 'عملیات نامشخص: ' . $data,
-                'show_alert' => true
-            ]);
+            $this->telegramService->answerCallbackQuery($callbackQueryId, ['text' => 'عملیات نامشخص: ' . $data, 'show_alert' => true]);
             error_log("Unhandled callback query data: " . $data . " by user ID: " . $userId);
         }
     }
@@ -281,12 +274,18 @@ class RequestHandler
     private function getAdminState(int $adminId): ?array
     {
         $row = Database::fetchOne("SELECT state, data FROM admin_states WHERE admin_id = ?", [$adminId]);
-        // json_decode is done here. $row['data'] is a JSON string from DB.
         return $row ? ['state' => $row['state'], 'data' => $row['data'] ? json_decode($row['data'], true) : []] : null;
     }
 
     private function clearAdminState(int $adminId): void
     {
         Database::executeQuery("DELETE FROM admin_states WHERE admin_id = ?", [$adminId]);
+    }
+
+    private function handleMissingMusicIdInState(int $chatId, int $userId, string $stateName): void {
+        error_log("Error: music_id not found in state for {$stateName}. User: " . $userId);
+        $this->telegramService->sendMessage($chatId, "خطای داخلی: اطلاعات موزیک در وضعیت فعلی یافت نشد. لطفاً مجدداً تلاش کنید.");
+        $this->clearAdminState($userId);
+        $this->musicController->sendMainMenu($chatId);
     }
 }
